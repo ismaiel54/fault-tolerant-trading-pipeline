@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  market-ingestor:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      target: market-ingestor
+    ports:
+      - "50051:50051"
+      - "8080:8080"
+    environment:
+      - PORT_GRPC=50051
+      - PORT_HTTP=8080
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  stream-processor:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      target: stream-processor
+    ports:
+      - "50052:50051"
+      - "8081:8080"
+    environment:
+      - PORT_GRPC=50051
+      - PORT_HTTP=8080
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  order-executor:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      target: order-executor
+    ports:
+      - "50053:50051"
+      - "8082:8080"
+    environment:
+      - PORT_GRPC=50051
+      - PORT_HTTP=8080
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  raft-node:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+      target: raft-node
+    ports:
+      - "50054:50051"
+      - "8083:8080"
+    environment:
+      - PORT_GRPC=50051
+      - PORT_HTTP=8080
+      - LOG_LEVEL=info
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+

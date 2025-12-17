@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+package stream_processor;
+
+option go_package = "github.com/ismaiel54/fault-tolerant-trading-pipeline/proto/stream_processor";
+
+// StreamProcessor service for processing market data streams
+service StreamProcessor {
+  rpc ProcessStream(ProcessRequest) returns (stream ProcessResponse);
+}
+
+message ProcessRequest {
+  string stream_id = 1;
+  repeated string symbols = 2;
+}
+
+message ProcessResponse {
+  string symbol = 1;
+  double processed_price = 2;
+  int64 timestamp = 3;
+}
+
