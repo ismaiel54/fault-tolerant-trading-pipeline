@@ -18,6 +18,8 @@ type HealthChecker struct {
 	logger     *zap.Logger
 	mu         sync.RWMutex
 	ready      bool
+	kafkaReady bool
+	usesKafka  bool
 }
 
 // NewHealthChecker creates a new health checker
@@ -62,12 +64,23 @@ func (h *HealthChecker) Shutdown(ctx context.Context) error {
 	return nil
 }
 
+// SetKafkaReady sets the Kafka client readiness status
+func (h *HealthChecker) SetKafkaReady(ready bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.kafkaReady = ready
+	h.usesKafka = true
+}
+
 func (h *HealthChecker) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	h.mu.RLock()
 	ready := h.ready
+	kafkaReady := h.kafkaReady
+	usesKafka := h.usesKafka
 	h.mu.RUnlock()
 
-	if ready {
+	// Health check passes if ready is true and (not using Kafka or Kafka is ready)
+	if ready && (!usesKafka || kafkaReady) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	} else {

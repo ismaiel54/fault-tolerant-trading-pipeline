@@ -7,14 +7,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/config"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/logging"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/msg"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/observability"
-	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/rpc/streamprocessor"
-	tradingv1 "github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
@@ -34,19 +35,23 @@ func main() {
 	logger.Info("starting market-ingestor service",
 		zap.Int("grpc_port", cfg.GRPCPort),
 		zap.Int("http_port", cfg.HTTPPort),
-		zap.String("stream_processor_addr", cfg.StreamProcessorGRPCAddr),
+		zap.String("kafka_brokers", cfg.KafkaBrokers),
 	)
-
-	// Dial stream-processor client
-	ctx := context.Background()
-	streamProcessorClient, err := streamprocessor.Dial(ctx, cfg.StreamProcessorGRPCAddr, logger)
-	if err != nil {
-		logger.Fatal("failed to dial stream-processor", zap.Error(err))
-	}
-	defer streamProcessorClient.Close()
 
 	// Create health checker
 	healthChecker := observability.NewHealthChecker(logger)
+
+	// Create Kafka producer
+	brokers := strings.Split(cfg.KafkaBrokers, ",")
+	for i := range brokers {
+		brokers[i] = strings.TrimSpace(brokers[i])
+	}
+	producer, err := msg.NewProducer(brokers, logger)
+	if err != nil {
+		logger.Fatal("failed to create kafka producer", zap.Error(err))
+	}
+	defer producer.Close()
+	healthChecker.SetKafkaReady(true)
 
 	// Create gRPC server
 	grpcServer := grpc.NewServer()
@@ -74,37 +79,42 @@ func main() {
 		}
 	}()
 
-	// Start tick sender
-	ticker := time.NewTicker(2 * time.Second)
+	// Start tick producer
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-	
+
 	tickCounter := 0.0
 	tickCh := make(chan struct{})
 	go func() {
-		for range ticker.C {
-			tickCounter += 0.01
-			tick := &tradingv1.Tick{
-				Symbol:       "AAPL",
-				Price:        150.0 + tickCounter,
-				TsUnixMillis: time.Now().UnixMilli(),
-			}
-			
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			ack, err := streamProcessorClient.ProcessTick(ctx, tick)
-			cancel()
-			
-			if err != nil {
-				logger.Error("failed to process tick", zap.Error(err))
-			} else {
-				logger.Info("tick processed",
-					zap.String("request_id", ack.RequestId),
-					zap.String("message", ack.Message),
-					zap.String("symbol", tick.Symbol),
-					zap.Float64("price", tick.Price),
-				)
+		defer close(tickCh)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				tickCounter += 0.01
+				eventID := uuid.New().String()
+				tickMsg := msg.TickMsg{
+					EventID:      eventID,
+					Symbol:       "AAPL",
+					Price:        150.0 + tickCounter,
+					TsUnixMillis: time.Now().UnixMilli(),
+				}
+
+				if err := producer.ProduceJSON(ctx, msg.TopicMarketTicks, tickMsg.Symbol, tickMsg); err != nil {
+					logger.Error("failed to produce tick", zap.Error(err))
+				} else {
+					logger.Info("tick produced",
+						zap.String("event_id", eventID),
+						zap.String("symbol", tickMsg.Symbol),
+						zap.Float64("price", tickMsg.Price),
+					)
+				}
 			}
 		}
-		close(tickCh)
 	}()
 
 	// Wait for interrupt signal
@@ -124,13 +134,12 @@ func main() {
 	logger.Info("shutting down gracefully...")
 
 	// Stop ticker
+	cancel()
 	ticker.Stop()
 	<-tickCh
 
-	// Close stream-processor client
-	if err := streamProcessorClient.Close(); err != nil {
-		logger.Error("error closing stream-processor client", zap.Error(err))
-	}
+	// Close producer
+	producer.Close()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

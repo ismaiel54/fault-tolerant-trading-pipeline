@@ -1,75 +1,58 @@
-version: '3.8'
-
 services:
-  market-ingestor:
-    build:
-      context: ..
-      dockerfile: deployments/Dockerfile
-      target: market-ingestor
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:latest
+    container_name: redpanda
+    command:
+      - redpanda
+      - start
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://localhost:9092
+      - --pandaproxy-addr
+      - internal://0.0.0.0:8082,external://0.0.0.0:18082
+      - --advertise-pandaproxy-addr
+      - internal://redpanda:8082,external://localhost:18082
+      - --schema-registry-addr
+      - 0.0.0.0:8081
+      - --rpc-addr
+      - redpanda:33145
+      - --advertise-rpc-addr
+      - redpanda:33145
+      - --smp
+      - '1'
+      - --memory
+      - 1G
+      - --mode dev-container
+      - --default-log-level=info
     ports:
-      - "50051:50051"
+      - "9092:9092"
+      - "19092:19092"
+      - "9644:9644"
+      - "8082:8082"
+      - "18082:18082"
+      - "8081:8081"
+    volumes:
+      - redpanda-data:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -q 'Healthy'"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redpanda-console:
+    image: docker.redpanda.com/redpandadata/console:latest
+    container_name: redpanda-console
+    environment:
+      CONFIG_FILEPATH: /tmp/config.yml
+      KAFKA_BROKERS: redpanda:9092
+      KAFKA_SCHEMAREGISTRY_ENABLED: "true"
+      KAFKA_SCHEMAREGISTRY_URLS: http://redpanda:8081
+    ports:
       - "8080:8080"
-    environment:
-      - PORT_GRPC=50051
-      - PORT_HTTP=8080
-      - LOG_LEVEL=info
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
+    depends_on:
+      redpanda:
+        condition: service_healthy
 
-  stream-processor:
-    build:
-      context: ..
-      dockerfile: deployments/Dockerfile
-      target: stream-processor
-    ports:
-      - "50052:50051"
-      - "8081:8080"
-    environment:
-      - PORT_GRPC=50051
-      - PORT_HTTP=8080
-      - LOG_LEVEL=info
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  order-executor:
-    build:
-      context: ..
-      dockerfile: deployments/Dockerfile
-      target: order-executor
-    ports:
-      - "50053:50051"
-      - "8082:8080"
-    environment:
-      - PORT_GRPC=50051
-      - PORT_HTTP=8080
-      - LOG_LEVEL=info
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
-  raft-node:
-    build:
-      context: ..
-      dockerfile: deployments/Dockerfile
-      target: raft-node
-    ports:
-      - "50054:50051"
-      - "8083:8080"
-    environment:
-      - PORT_GRPC=50051
-      - PORT_HTTP=8080
-      - LOG_LEVEL=info
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/healthz"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-
+volumes:
+  redpanda-data:

@@ -22,6 +22,9 @@ type Config struct {
 
 	// Stream processor gRPC address (for market-ingestor)
 	StreamProcessorGRPCAddr string
+
+	// Kafka brokers (comma-separated)
+	KafkaBrokers string
 }
 
 // LoadConfig loads configuration from environment variables with defaults
@@ -37,6 +40,7 @@ func LoadConfig(serviceName string) *Config {
 		HTTPPort:                getEnvAsInt("PORT_HTTP", 8080),
 		LogLevel:                getEnvAsString("LOG_LEVEL", "info"),
 		StreamProcessorGRPCAddr: getEnvAsString("STREAM_PROCESSOR_GRPC_ADDR", "127.0.0.1:50052"),
+		KafkaBrokers:            getEnvAsString("KAFKA_BROKERS", "127.0.0.1:9092"),
 	}
 
 	return cfg
