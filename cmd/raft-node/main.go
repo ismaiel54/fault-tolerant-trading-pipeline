@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/chaos"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/config"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/logging"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/observability"
@@ -47,6 +48,10 @@ func main() {
 		zap.Bool("bootstrap", raftCfg.Bootstrap),
 	)
 
+	// Load chaos configuration
+	chaosCfg := chaos.LoadConfig()
+	chaosInst := chaos.New(chaosCfg, logger)
+
 	// Start Raft node
 	ctx := context.Background()
 	raftNode, err := raft.Start(ctx, raftCfg, logger)
@@ -54,6 +59,12 @@ func main() {
 		logger.Fatal("failed to start raft node", zap.Error(err))
 	}
 	defer raftNode.Shutdown()
+
+	// Configure exit on leader if chaos enabled
+	if chaosInst.ShouldExitOnLeader() {
+		raftNode.SetExitOnLeader(true)
+		logger.Warn("CHAOS_EXIT_ON_LEADER enabled", zap.String("node_id", raftCfg.NodeID))
+	}
 
 	// If join address is set, join the cluster
 	if raftCfg.JoinAddr != "" {
@@ -73,8 +84,8 @@ func main() {
 	grpcServer := grpc.NewServer()
 	healthChecker.RegisterGRPC(grpcServer)
 
-	// Register RaftNodeService with Raft node
-	raftNodeServer := raftnode.NewServer(raftNode, logger)
+	// Register RaftNodeService with Raft node and chaos
+	raftNodeServer := raftnode.NewServer(raftNode, chaosInst, raftCfg.NodeID, logger)
 	tradingv1.RegisterRaftNodeServiceServer(grpcServer, raftNodeServer)
 
 	// Start gRPC server

@@ -139,6 +139,72 @@ The system uses HashiCorp Raft for consensus and replication of processed order 
 - State is replicated across all nodes
 - Outbox events remain local (SQLite) for eventual publishing
 
+## Failure Scenarios (Phase 6)
+
+Phase 6 adds deterministic failure simulation ("chaos") to prove the system recovers correctly under partial failures without double-processing orders.
+
+### Running the Demo
+
+```bash
+./scripts/demo-phase6.sh
+```
+
+This script:
+1. Starts Redpanda and creates topics
+2. Starts 3 Raft nodes
+3. Starts the trading pipeline (stream-processor, order-executor, market-ingestor)
+4. Runs three failure scenarios:
+   - **Scenario 1**: Partition leader during Apply (pause/resume leader)
+   - **Scenario 2**: Kill leader mid-run (CHAOS_EXIT_ON_LEADER)
+   - **Scenario 3**: Flapping network (30% drop rate, 50-250ms delays)
+5. Verifies no duplicate order events using the verifier tool
+
+### Chaos Configuration
+
+Chaos is opt-in and disabled by default. Enable it via environment variables:
+
+- `CHAOS_ENABLED`: Enable chaos injection (default: false)
+- `CHAOS_PROFILE`: Profile string like "drop-pct=30,delay=50-250"
+- `CHAOS_TARGET_NODE_ID`: Apply chaos only to specific node
+- `CHAOS_DROP_PCT`: Drop percentage (0-100)
+- `CHAOS_DELAY_MS_MIN`: Minimum delay in milliseconds
+- `CHAOS_DELAY_MS_MAX`: Maximum delay in milliseconds
+- `CHAOS_SEED`: Random seed for deterministic behavior
+- `CHAOS_EXIT_ON_LEADER`: Exit when node becomes leader (default: false)
+
+### Verifier Tool
+
+The verifier tool (`cmd/verifier`) consumes order events and checks for duplicates:
+
+```bash
+./bin/verifier <duration_seconds> [brokers]
+./bin/verifier 30 127.0.0.1:9092
+```
+
+It prints:
+- Total events consumed
+- Unique order IDs
+- Duplicate order IDs (if any)
+- Exit code: 0 if no duplicates, 1 if duplicates found
+
+### What to Look For
+
+In the logs, you should see:
+- Leader election messages ("became leader")
+- Retry attempts with exponential backoff
+- Leader redirects ("following leader redirect")
+- Chaos injections ("chaos delay injected", "chaos drop injected")
+- No duplicate order events for the same order_id
+
+### Why No Duplicates Happen
+
+The system prevents duplicates through:
+1. **Raft deduplication**: The FSM checks if an order_id already exists before inserting
+2. **Idempotent Apply**: Multiple Apply calls for the same order_id return "duplicate"
+3. **Read-after-uncertain-Apply**: If Apply fails or is uncertain, a Read query verifies the order was processed
+4. **Outbox pattern**: Events are only created after successful Raft Apply, preventing duplicate outbox entries
+5. **Offset commits**: Kafka offsets are committed only after successful processing, ensuring redelivered messages are deduplicated
+
 ## Development
 
 ### Project Structure

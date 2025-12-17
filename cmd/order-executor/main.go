@@ -165,7 +165,7 @@ func main() {
 				return fmt.Errorf("failed to encode command: %w", err)
 			}
 
-			// Apply to Raft (with leader following)
+			// Apply to Raft (with leader following and retry)
 			raftCmd := &tradingv1.Command{
 				CommandId:     uuid.New().String(),
 				Kind:          raft.CommandKindUpsertProcessedOrder,
@@ -173,12 +173,53 @@ func main() {
 				TsUnixMillis:  time.Now().UnixMilli(),
 			}
 
-			ack, err := raftClient.Apply(ctx, raftCmd, 3)
+			// Create context with overall timeout
+			applyCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+
+			ack, err := raftClient.Apply(applyCtx, raftCmd, 5)
 			if err != nil {
+				// If apply failed but might have succeeded, check via Read
+				logger.Warn("raft apply failed, checking if order was processed",
+					zap.String("order_id", orderCmd.OrderID),
+					zap.Error(err),
+				)
+
+				// Read to check if order was already processed
+				readQuery := &tradingv1.Query{
+					QueryId: uuid.New().String(),
+					Kind:    "GET_PROCESSED_ORDER",
+					Payload: []byte(fmt.Sprintf(`{"order_id":"%s"}`, orderCmd.OrderID)),
+				}
+
+				readResp, readErr := raftClient.Read(ctx, readQuery)
+				if readErr == nil && readResp.Found {
+					// Order was already processed
+					logger.Info("order already processed (found via Read after failed Apply)",
+						zap.String("order_id", orderCmd.OrderID),
+					)
+					return nil
+				}
+
 				return fmt.Errorf("failed to apply to raft: %w", err)
 			}
 
 			if !ack.Applied {
+				// Check if order was processed despite applied=false
+				readQuery := &tradingv1.Query{
+					QueryId: uuid.New().String(),
+					Kind:    "GET_PROCESSED_ORDER",
+					Payload: []byte(fmt.Sprintf(`{"order_id":"%s"}`, orderCmd.OrderID)),
+				}
+
+				readResp, readErr := raftClient.Read(ctx, readQuery)
+				if readErr == nil && readResp.Found {
+					logger.Info("order already processed (found via Read after applied=false)",
+						zap.String("order_id", orderCmd.OrderID),
+					)
+					return nil
+				}
+
 				return fmt.Errorf("raft apply failed: %s", ack.Message)
 			}
 
@@ -222,10 +263,14 @@ func main() {
 			logger.Info("order command processed via Raft",
 				zap.String("order_id", orderCmd.OrderID),
 				zap.String("event_id", orderCmd.EventID),
+				zap.String("command_event_id", orderCmd.EventID),
 				zap.String("symbol", orderCmd.Symbol),
 				zap.String("side", orderCmd.Side),
 				zap.Int64("qty", orderCmd.Qty),
 				zap.Float64("price", orderCmd.Price),
+				zap.String("kafka_topic", rec.Topic),
+				zap.Int32("kafka_partition", rec.Partition),
+				zap.Int64("kafka_offset", rec.Offset),
 			)
 
 			// Return nil to commit offset after Raft apply succeeded

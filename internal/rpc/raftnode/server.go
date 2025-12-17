@@ -7,23 +7,30 @@ import (
 	"time"
 
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/chaos"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/raft"
 	hashicorpraft "github.com/hashicorp/raft"
 	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // Server implements RaftNodeService
 type Server struct {
 	tradingv1.UnimplementedRaftNodeServiceServer
 	raftNode *raft.Node
+	chaos    *chaos.Chaos
 	logger   *zap.Logger
+	nodeID   string
 }
 
 // NewServer creates a new RaftNodeService server
-func NewServer(raftNode *raft.Node, logger *zap.Logger) tradingv1.RaftNodeServiceServer {
+func NewServer(raftNode *raft.Node, chaos *chaos.Chaos, nodeID string, logger *zap.Logger) tradingv1.RaftNodeServiceServer {
 	return &Server{
 		raftNode: raftNode,
+		chaos:    chaos,
 		logger:   logger,
+		nodeID:   nodeID,
 	}
 }
 
@@ -35,6 +42,18 @@ func (s *Server) Apply(ctx context.Context, cmd *tradingv1.Command) (*tradingv1.
 	}
 	if cmd.Kind == "" {
 		return nil, fmt.Errorf("kind cannot be empty")
+	}
+
+	// Inject chaos delay
+	if s.chaos != nil {
+		if err := s.chaos.MaybeDelay(ctx, s.nodeID, "Apply"); err != nil {
+			return nil, err
+		}
+
+		// Inject chaos drop
+		if s.chaos.MaybeDrop(s.nodeID, "Apply") {
+			return nil, status.Error(codes.Unavailable, "chaos dropped")
+		}
 	}
 
 	// Check if this node is the leader
@@ -93,6 +112,18 @@ func (s *Server) Read(ctx context.Context, query *tradingv1.Query) (*tradingv1.R
 		return nil, fmt.Errorf("query_id cannot be empty")
 	}
 
+	// Inject chaos delay
+	if s.chaos != nil {
+		if err := s.chaos.MaybeDelay(ctx, s.nodeID, "Read"); err != nil {
+			return nil, err
+		}
+
+		// Inject chaos drop
+		if s.chaos.MaybeDrop(s.nodeID, "Read") {
+			return nil, status.Error(codes.Unavailable, "chaos dropped")
+		}
+	}
+
 	// Handle GET_PROCESSED_ORDER query
 	if query.Kind == "GET_PROCESSED_ORDER" {
 		var payload struct {
@@ -144,6 +175,18 @@ func (s *Server) Read(ctx context.Context, query *tradingv1.Query) (*tradingv1.R
 
 // Join handles a join request
 func (s *Server) Join(ctx context.Context, req *tradingv1.JoinRequest) (*tradingv1.JoinResponse, error) {
+	// Inject chaos delay
+	if s.chaos != nil {
+		if err := s.chaos.MaybeDelay(ctx, s.nodeID, "Join"); err != nil {
+			return nil, err
+		}
+
+		// Inject chaos drop
+		if s.chaos.MaybeDrop(s.nodeID, "Join") {
+			return nil, status.Error(codes.Unavailable, "chaos dropped")
+		}
+	}
+
 	if !s.raftNode.IsLeader() {
 		leader := s.raftNode.Leader()
 		return &tradingv1.JoinResponse{

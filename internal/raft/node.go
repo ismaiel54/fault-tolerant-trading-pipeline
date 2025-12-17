@@ -14,10 +14,13 @@ import (
 
 // Node wraps a HashiCorp Raft node
 type Node struct {
-	raft   *raft.Raft
-	fsm    *FSM
-	config *Config
-	logger *zap.Logger
+	raft          *raft.Raft
+	fsm           *FSM
+	config        *Config
+	logger        *zap.Logger
+	exitOnLeader  bool
+	leaderCh      chan bool
+	shutdownCh    chan struct{}
 }
 
 // Start starts a Raft node
@@ -69,11 +72,16 @@ func Start(ctx context.Context, cfg *Config, logger *zap.Logger) (*Node, error) 
 	}
 
 	node := &Node{
-		raft:   r,
-		fsm:    fsm,
-		config: cfg,
-		logger: logger,
+		raft:         r,
+		fsm:          fsm,
+		config:       cfg,
+		logger:       logger,
+		leaderCh:     make(chan bool, 1),
+		shutdownCh:   make(chan struct{}),
 	}
+
+	// Start leader monitoring goroutine
+	go node.monitorLeadership()
 
 	// Bootstrap if configured
 	if cfg.Bootstrap {
@@ -144,8 +152,38 @@ func (n *Node) AddVoter(serverID raft.ServerID, address raft.ServerAddress) erro
 	return future.Error()
 }
 
+// SetExitOnLeader sets whether the node should exit when becoming leader
+func (n *Node) SetExitOnLeader(exit bool) {
+	n.exitOnLeader = exit
+}
+
+// monitorLeadership monitors leadership changes and exits if configured
+func (n *Node) monitorLeadership() {
+	wasLeader := false
+	for {
+		select {
+		case <-n.shutdownCh:
+			return
+		case <-time.After(500 * time.Millisecond):
+			isLeader := n.IsLeader()
+			if isLeader && !wasLeader {
+				// Just became leader
+				n.logger.Info("became leader", zap.String("node_id", n.config.NodeID))
+				if n.exitOnLeader {
+					n.logger.Warn("exiting due to CHAOS_EXIT_ON_LEADER", zap.String("node_id", n.config.NodeID))
+					// Give a short delay for graceful shutdown
+					time.Sleep(2 * time.Second)
+					os.Exit(0)
+				}
+			}
+			wasLeader = isLeader
+		}
+	}
+}
+
 // Shutdown shuts down the Raft node
 func (n *Node) Shutdown() error {
+	close(n.shutdownCh)
 	if n.raft != nil {
 		future := n.raft.Shutdown()
 		return future.Error()

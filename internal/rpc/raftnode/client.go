@@ -3,21 +3,26 @@ package raftnode
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
-// Client is a gRPC client for RaftNodeService with leader following
+// Client is a gRPC client for RaftNodeService with leader following and retry logic
 type Client struct {
-	cc     *grpc.ClientConn
-	svc    tradingv1.RaftNodeServiceClient
-	logger *zap.Logger
-	addr   string
+	cc          *grpc.ClientConn
+	svc         tradingv1.RaftNodeServiceClient
+	logger      *zap.Logger
+	addr        string
+	knownAddrs  []string
+	currentIdx  int
 }
 
 // Dial creates a new client connection
@@ -29,17 +34,29 @@ func Dial(ctx context.Context, addr string, logger *zap.Logger) (*Client, error)
 		return nil, fmt.Errorf("failed to dial raft node: %w", err)
 	}
 
+	// Parse known addresses from env if available
+	knownAddrs := []string{addr}
+	if addrsEnv := os.Getenv("RAFT_NODE_GRPC_ADDRS"); addrsEnv != "" {
+		knownAddrs = strings.Split(addrsEnv, ",")
+		for i := range knownAddrs {
+			knownAddrs[i] = strings.TrimSpace(knownAddrs[i])
+		}
+	}
+
 	return &Client{
-		cc:     conn,
-		svc:    tradingv1.NewRaftNodeServiceClient(conn),
-		logger: logger,
-		addr:   addr,
+		cc:         conn,
+		svc:        tradingv1.NewRaftNodeServiceClient(conn),
+		logger:     logger,
+		addr:       addr,
+		knownAddrs: knownAddrs,
+		currentIdx: 0,
 	}, nil
 }
 
-// Apply applies a command with leader following
+// Apply applies a command with leader following and exponential backoff retry
 func (c *Client) Apply(ctx context.Context, cmd *tradingv1.Command, maxRetries int) (*tradingv1.ApplyAck, error) {
 	currentAddr := c.addr
+	backoffMs := 100
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		// Dial current address if changed
@@ -49,37 +66,74 @@ func (c *Client) Apply(ctx context.Context, cmd *tradingv1.Command, maxRetries i
 				grpc.WithTransportCredentials(insecure.NewCredentials()),
 			)
 			if err != nil {
-				return nil, fmt.Errorf("failed to dial raft node: %w", err)
+				c.logger.Warn("failed to dial new address",
+					zap.String("addr", currentAddr),
+					zap.Error(err),
+				)
+				// Try next address in round-robin
+				currentAddr = c.nextAddr()
+				time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+				backoffMs *= 2
+				continue
 			}
 			c.cc = conn
 			c.svc = tradingv1.NewRaftNodeServiceClient(conn)
 			c.addr = currentAddr
 		}
 
+		// Create context with timeout for this attempt
+		attemptCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		defer cancel()
+
 		// Apply command
-		ack, err := c.svc.Apply(ctx, cmd)
+		ack, err := c.svc.Apply(attemptCtx, cmd)
 		if err != nil {
+			// Check if it's a retryable error
+			if isRetryableError(err) {
+				c.logger.Info("retryable error, retrying",
+					zap.Int("attempt", attempt+1),
+					zap.Int("max_retries", maxRetries),
+					zap.String("error", err.Error()),
+					zap.Int("backoff_ms", backoffMs),
+				)
+				time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+				backoffMs *= 2
+				continue
+			}
 			return nil, fmt.Errorf("failed to apply command: %w", err)
 		}
 
 		// If applied successfully, return
 		if ack.Applied {
+			c.logger.Debug("command applied successfully",
+				zap.String("command_id", cmd.CommandId),
+				zap.Int("attempt", attempt+1),
+			)
 			return ack, nil
 		}
 
-		// If not leader and we have a leader hint, try to find gRPC address
+		// If not leader and we have a leader hint, try leader
 		if ack.LeaderHint != "" && attempt < maxRetries-1 {
 			c.logger.Info("following leader redirect",
 				zap.String("current", currentAddr),
 				zap.String("leader_hint", ack.LeaderHint),
+				zap.Int("attempt", attempt+1),
 			)
-			// Try common gRPC ports for the leader
 			leaderGRPC := c.findLeaderGRPCAddr(ack.LeaderHint)
 			if leaderGRPC != "" {
 				currentAddr = leaderGRPC
-				time.Sleep(100 * time.Millisecond)
+				time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+				backoffMs *= 2
 				continue
 			}
+		}
+
+		// If no leader hint, try round-robin
+		if attempt < maxRetries-1 {
+			currentAddr = c.nextAddr()
+			time.Sleep(time.Duration(backoffMs) * time.Millisecond)
+			backoffMs *= 2
+			continue
 		}
 
 		return ack, nil
@@ -88,8 +142,15 @@ func (c *Client) Apply(ctx context.Context, cmd *tradingv1.Command, maxRetries i
 	return nil, fmt.Errorf("failed to apply command after %d retries", maxRetries)
 }
 
+// Read performs a read query with retry
+func (c *Client) Read(ctx context.Context, query *tradingv1.Query) (*tradingv1.ReadResp, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	return c.svc.Read(ctx, query)
+}
+
 // findLeaderGRPCAddr tries to find the gRPC address from Raft address
-// This is a simplified mapping - in production you'd have proper service discovery
 func (c *Client) findLeaderGRPCAddr(raftAddr string) string {
 	// Extract host from Raft address
 	parts := strings.Split(raftAddr, ":")
@@ -113,12 +174,30 @@ func (c *Client) findLeaderGRPCAddr(raftAddr string) string {
 	return ""
 }
 
-// Read performs a read query
-func (c *Client) Read(ctx context.Context, query *tradingv1.Query) (*tradingv1.ReadResp, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
+// nextAddr returns the next address in round-robin fashion
+func (c *Client) nextAddr() string {
+	if len(c.knownAddrs) == 0 {
+		return c.addr
+	}
+	c.currentIdx = (c.currentIdx + 1) % len(c.knownAddrs)
+	return c.knownAddrs[c.currentIdx]
+}
 
-	return c.svc.Read(ctx, query)
+// isRetryableError checks if an error is retryable
+func isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	st, ok := status.FromError(err)
+	if !ok {
+		return false
+	}
+
+	// Retry on Unavailable, DeadlineExceeded, and ResourceExhausted
+	return st.Code() == codes.Unavailable ||
+		st.Code() == codes.DeadlineExceeded ||
+		st.Code() == codes.ResourceExhausted
 }
 
 // Close closes the client connection
@@ -128,3 +207,4 @@ func (c *Client) Close() error {
 	}
 	return nil
 }
+

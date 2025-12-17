@@ -8,7 +8,7 @@ GOFMT=$(GOCMD) fmt
 GOVET=$(GOCMD) vet
 
 # Service binaries
-SERVICES=market-ingestor stream-processor order-executor raft-node
+SERVICES=market-ingestor stream-processor order-executor raft-node verifier
 BIN_DIR=bin
 
 # Generate protobuf code
