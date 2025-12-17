@@ -13,6 +13,7 @@ import (
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/config"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/logging"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/observability"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/raft"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/rpc/raftnode"
 	tradingv1 "github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1"
 	"go.uber.org/zap"
@@ -20,7 +21,14 @@ import (
 )
 
 func main() {
-	// Load configuration
+	// Load Raft configuration
+	raftCfg, err := raft.LoadConfig()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "failed to load raft config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Load service configuration
 	cfg := config.LoadConfig("raft-node")
 
 	// Initialize logger
@@ -34,7 +42,29 @@ func main() {
 	logger.Info("starting raft-node service",
 		zap.Int("grpc_port", cfg.GRPCPort),
 		zap.Int("http_port", cfg.HTTPPort),
+		zap.String("node_id", raftCfg.NodeID),
+		zap.String("raft_bind_addr", raftCfg.BindAddr),
+		zap.Bool("bootstrap", raftCfg.Bootstrap),
 	)
+
+	// Start Raft node
+	ctx := context.Background()
+	raftNode, err := raft.Start(ctx, raftCfg, logger)
+	if err != nil {
+		logger.Fatal("failed to start raft node", zap.Error(err))
+	}
+	defer raftNode.Shutdown()
+
+	// If join address is set, join the cluster
+	if raftCfg.JoinAddr != "" {
+		// Wait a bit for Raft to stabilize
+		time.Sleep(2 * time.Second)
+
+		// Join via gRPC (we'll implement a simple join client)
+		logger.Info("joining cluster", zap.String("join_addr", raftCfg.JoinAddr))
+		// Note: Join will be handled by the Join RPC call from another node
+		// For now, we'll log that join is needed
+	}
 
 	// Create health checker
 	healthChecker := observability.NewHealthChecker(logger)
@@ -42,9 +72,9 @@ func main() {
 	// Create gRPC server
 	grpcServer := grpc.NewServer()
 	healthChecker.RegisterGRPC(grpcServer)
-	
-	// Register RaftNodeService
-	raftNodeServer := raftnode.NewServer(logger)
+
+	// Register RaftNodeService with Raft node
+	raftNodeServer := raftnode.NewServer(raftNode, logger)
 	tradingv1.RegisterRaftNodeServiceServer(grpcServer, raftNodeServer)
 
 	// Start gRPC server
@@ -69,6 +99,22 @@ func main() {
 		}
 	}()
 
+	// Log leader status periodically
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if raftNode.IsLeader() {
+				logger.Info("raft status", zap.Bool("is_leader", true))
+			} else {
+				logger.Debug("raft status",
+					zap.Bool("is_leader", false),
+					zap.String("leader", raftNode.Leader()),
+				)
+			}
+		}
+	}()
+
 	// Wait for interrupt signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -85,11 +131,16 @@ func main() {
 	// Graceful shutdown
 	logger.Info("shutting down gracefully...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	// Shutdown Raft node
+	if err := raftNode.Shutdown(); err != nil {
+		logger.Error("error shutting down raft node", zap.Error(err))
+	}
+
 	// Shutdown health checker
-	if err := healthChecker.Shutdown(ctx); err != nil {
+	if err := healthChecker.Shutdown(shutdownCtx); err != nil {
 		logger.Error("error shutting down health checker", zap.Error(err))
 	}
 

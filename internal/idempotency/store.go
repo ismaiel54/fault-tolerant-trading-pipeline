@@ -252,3 +252,8 @@ func (s *Store) Close() error {
 	return nil
 }
 
+// GetDB returns the underlying database connection (for direct access if needed)
+func (s *Store) GetDB() *sql.DB {
+	return s.db
+}
+

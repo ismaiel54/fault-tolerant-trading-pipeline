@@ -1,4 +1,4 @@
-.PHONY: fmt vet test proto build run-market-ingestor run-stream-processor run-order-executor run-raft-node ci clean dev-up dev-down topics topics-list
+.PHONY: fmt vet test test-integration proto build run-market-ingestor run-stream-processor run-order-executor run-raft-node run-raft-1 run-raft-2 run-raft-3 ci clean dev-up dev-down topics topics-list
 
 # Go parameters
 GOCMD=go
@@ -39,6 +39,10 @@ test:
 	@echo "Running tests..."
 	$(GOTEST) -v ./...
 
+test-integration:
+	@echo "Running integration tests..."
+	@INTEGRATION=1 $(GOTEST) -v ./internal/it/...
+
 # Run individual services
 run-market-ingestor: market-ingestor
 	@echo "Running market-ingestor..."
@@ -55,6 +59,18 @@ run-order-executor: order-executor
 run-raft-node: raft-node
 	@echo "Running raft-node..."
 	./$(BIN_DIR)/raft-node
+
+run-raft-1: raft-node
+	@echo "Running raft-node 1..."
+	@./scripts/raft-1.sh
+
+run-raft-2: raft-node
+	@echo "Running raft-node 2..."
+	@./scripts/raft-2.sh
+
+run-raft-3: raft-node
+	@echo "Running raft-node 3..."
+	@./scripts/raft-3.sh
 
 # CI pipeline: fmt + vet + test + proto + build
 ci: fmt vet test proto build

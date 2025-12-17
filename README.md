@@ -50,16 +50,35 @@ make build
 
 ### Run the pipeline locally
 
+#### Start Raft Cluster (3 nodes)
+
 In separate terminals:
 
 ```bash
-# Terminal 1: Stream processor
+# Terminal 1: Raft node 1 (bootstrap)
+make run-raft-1
+
+# Terminal 2: Raft node 2 (joins via node 1)
+make run-raft-2
+
+# Terminal 3: Raft node 3 (joins via node 1)
+make run-raft-3
+```
+
+Wait a few seconds for leader election. Check logs to see which node is leader.
+
+#### Run Trading Pipeline
+
+In separate terminals:
+
+```bash
+# Terminal 4: Stream processor
 make run-stream-processor
 
-# Terminal 2: Order executor
+# Terminal 5: Order executor (connects to Raft node 1 by default)
 make run-order-executor
 
-# Terminal 3: Market ingestor (produces ticks)
+# Terminal 6: Market ingestor (produces ticks)
 make run-market-ingestor
 ```
 
@@ -77,6 +96,13 @@ Services can be configured via environment variables:
 - `PORT_HTTP`: HTTP server port (default: 8080)
 - `LOG_LEVEL`: Log level - debug, info, warn, error (default: info)
 - `KAFKA_BROKERS`: Kafka broker addresses (default: 127.0.0.1:9092)
+- `RAFT_NODE_ID`: Raft node identifier (required for raft-node)
+- `RAFT_BIND_ADDR`: Raft transport bind address (default: 127.0.0.1:7000)
+- `RAFT_ADVERTISE_ADDR`: Raft transport advertise address (default: same as bind)
+- `RAFT_DATA_DIR`: Raft data directory (default: ./.data/raft/<node_id>)
+- `RAFT_BOOTSTRAP`: Bootstrap cluster (default: false)
+- `RAFT_JOIN_ADDR`: gRPC address of node to join (default: empty)
+- `RAFT_NODE_GRPC_ADDR`: Raft node gRPC address for order-executor (default: 127.0.0.1:50070)
 
 Example:
 
@@ -92,6 +118,26 @@ Each service exposes:
 - **gRPC**: Standard gRPC health service
 
 Health checks verify that Kafka clients are connected and consumers are running.
+
+### Raft Cluster
+
+The system uses HashiCorp Raft for consensus and replication of processed order state. The `order-executor` service uses Raft to ensure deduplication is consistent across node restarts and leader changes.
+
+**Raft Node Ports:**
+- Node 1: gRPC 50070, HTTP 8080, Raft 7000
+- Node 2: gRPC 50071, HTTP 8081, Raft 7001
+- Node 3: gRPC 50072, HTTP 8082, Raft 7002
+
+**Verifying Leader:**
+- Check logs for "raft status" messages
+- Use gRPC `Leader` RPC call
+- Leader election typically completes within a few seconds
+
+**Deduplication:**
+- Order deduplication is handled by Raft FSM
+- Duplicate orders are detected at the Raft level
+- State is replicated across all nodes
+- Outbox events remain local (SQLite) for eventual publishing
 
 ## Development
 

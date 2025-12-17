@@ -13,6 +13,8 @@ service OrderExecutorService {
 service RaftNodeService {
   rpc Apply(Command) returns (ApplyAck);
   rpc Read(Query) returns (ReadResp);
+  rpc Join(JoinRequest) returns (JoinResponse);
+  rpc Leader(LeaderRequest) returns (LeaderResponse);
 }
 
 // Side represents order side
@@ -77,5 +79,28 @@ message ReadResp {
   bool found = 2;
   bytes payload = 3;
   string message = 4;
+}
+
+// JoinRequest requests joining a Raft cluster
+message JoinRequest {
+  string node_id = 1;
+  string raft_address = 2;
+}
+
+// JoinResponse responds to a join request
+message JoinResponse {
+  bool ok = 1;
+  string leader_hint = 2;
+  string message = 3;
+}
+
+// LeaderRequest requests leader information
+message LeaderRequest {
+}
+
+// LeaderResponse returns leader information
+message LeaderResponse {
+  string leader_raft_address = 1;
+  bool is_leader = 2;
 }
 

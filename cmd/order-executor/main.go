@@ -13,12 +13,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/config"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/idempotency"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/logging"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/msg"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/observability"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/rpc/orderexecutor"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/rpc/raftnode"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/raft"
 	tradingv1 "github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
@@ -41,6 +44,7 @@ func main() {
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("kafka_brokers", cfg.KafkaBrokers),
 		zap.String("data_dir", cfg.DataDir),
+		zap.String("raft_node_addr", cfg.RaftNodeGRPCAddr),
 	)
 
 	// Create data directory
@@ -48,7 +52,7 @@ func main() {
 		logger.Fatal("failed to create data directory", zap.Error(err))
 	}
 
-	// Open idempotency store
+	// Open idempotency store (for outbox only - processed_commands now in Raft)
 	dbPath := filepath.Join(cfg.DataDir, "orders.db")
 	store, err := idempotency.Open(dbPath)
 	if err != nil {
@@ -57,6 +61,14 @@ func main() {
 	defer store.Close()
 
 	logger.Info("idempotency store opened", zap.String("path", dbPath))
+
+	// Create Raft node client
+	ctx := context.Background()
+	raftClient, err := raftnode.Dial(ctx, cfg.RaftNodeGRPCAddr, logger)
+	if err != nil {
+		logger.Fatal("failed to dial raft node", zap.Error(err))
+	}
+	defer raftClient.Close()
 
 	// Create health checker
 	healthChecker := observability.NewHealthChecker(logger)
@@ -113,12 +125,12 @@ func main() {
 	}()
 
 	// Start consumer
-	ctx, cancel := context.WithCancel(context.Background())
+	consumerCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	consumerErrCh := make(chan error, 1)
 	go func() {
-		err := consumer.Run(ctx, func(ctx context.Context, rec msg.Record) error {
+		err := consumer.Run(consumerCtx, func(ctx context.Context, rec msg.Record) error {
 			// Parse order command message
 			var orderCmd msg.OrderCmdMsg
 			if err := json.Unmarshal(rec.Value, &orderCmd); err != nil {
@@ -139,35 +151,84 @@ func main() {
 				return fmt.Errorf("symbol cannot be empty")
 			}
 
-			// Process order command atomically (idempotent)
-			result, err := store.ProcessOrderCommand(ctx, orderCmd)
-			if err != nil {
-				return fmt.Errorf("failed to process order command: %w", err)
+			// Build Raft command
+			upsertCmd := raft.UpsertProcessedOrderCommand{
+				OrderID:        orderCmd.OrderID,
+				CommandEventID: orderCmd.EventID,
+				Status:         "ACCEPTED",
+				Reason:         "accepted",
+				TsUnixMillis:   time.Now().UnixMilli(),
 			}
 
-			if result.Duplicate {
-				logger.Info("duplicate order command detected, skipping",
+			cmdBytes, err := raft.EncodeCommand(raft.CommandKindUpsertProcessedOrder, upsertCmd)
+			if err != nil {
+				return fmt.Errorf("failed to encode command: %w", err)
+			}
+
+			// Apply to Raft (with leader following)
+			raftCmd := &tradingv1.Command{
+				CommandId:     uuid.New().String(),
+				Kind:          raft.CommandKindUpsertProcessedOrder,
+				Payload:       cmdBytes,
+				TsUnixMillis:  time.Now().UnixMilli(),
+			}
+
+			ack, err := raftClient.Apply(ctx, raftCmd, 3)
+			if err != nil {
+				return fmt.Errorf("failed to apply to raft: %w", err)
+			}
+
+			if !ack.Applied {
+				return fmt.Errorf("raft apply failed: %s", ack.Message)
+			}
+
+			// Check if duplicate
+			isDuplicate := ack.Message == "duplicate"
+			if isDuplicate {
+				logger.Info("duplicate order command detected via Raft, skipping",
 					zap.String("order_id", orderCmd.OrderID),
-					zap.String("status", result.Status),
-					zap.String("reason", result.Reason),
+					zap.String("command_event_id", orderCmd.EventID),
 				)
 				// Return nil to commit offset - order already processed
 				return nil
 			}
 
-			logger.Info("order command processed",
+			// New order - create outbox event (local SQLite)
+			eventID := "evt-" + orderCmd.EventID
+			orderEvent := msg.OrderEventMsg{
+				EventID:      eventID,
+				OrderID:      orderCmd.OrderID,
+				Status:       "ACCEPTED",
+				Reason:       "accepted",
+				TsUnixMillis: time.Now().UnixMilli(),
+			}
+
+			eventJSON, err := json.Marshal(orderEvent)
+			if err != nil {
+				return fmt.Errorf("failed to marshal order event: %w", err)
+			}
+
+			// Insert into outbox (local SQLite)
+			now := time.Now().UnixMilli()
+			_, err = store.GetDB().ExecContext(ctx,
+				`INSERT INTO outbox_events (order_id, event_id, topic, key, payload_json, created_unix_millis, published_unix_millis)
+				 VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+				orderCmd.OrderID, eventID, "orders.events", orderCmd.OrderID, string(eventJSON), now,
+			)
+			if err != nil {
+				return fmt.Errorf("failed to insert outbox event: %w", err)
+			}
+
+			logger.Info("order command processed via Raft",
 				zap.String("order_id", orderCmd.OrderID),
 				zap.String("event_id", orderCmd.EventID),
 				zap.String("symbol", orderCmd.Symbol),
 				zap.String("side", orderCmd.Side),
 				zap.Int64("qty", orderCmd.Qty),
 				zap.Float64("price", orderCmd.Price),
-				zap.String("status", result.Status),
 			)
 
-			// Outbox event was created in the transaction
-			// Publisher loop will handle publishing asynchronously
-			// Return nil to commit offset after DB transaction succeeded
+			// Return nil to commit offset after Raft apply succeeded
 			return nil
 		})
 		if err != nil {
@@ -178,7 +239,7 @@ func main() {
 	// Start outbox publisher loop
 	publisherErrCh := make(chan error, 1)
 	go func() {
-		if err := publisher.Run(ctx); err != nil {
+		if err := publisher.Run(consumerCtx); err != nil {
 			publisherErrCh <- err
 		}
 	}()
@@ -215,6 +276,7 @@ func main() {
 	cancel()
 	producer.Close()
 	consumer.Close()
+	raftClient.Close()
 	store.Close()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

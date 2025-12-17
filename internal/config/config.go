@@ -28,6 +28,9 @@ type Config struct {
 
 	// Data directory for SQLite databases
 	DataDir string
+
+	// Raft node gRPC address (for order-executor)
+	RaftNodeGRPCAddr string
 }
 
 // LoadConfig loads configuration from environment variables with defaults
@@ -45,6 +48,7 @@ func LoadConfig(serviceName string) *Config {
 		StreamProcessorGRPCAddr: getEnvAsString("STREAM_PROCESSOR_GRPC_ADDR", "127.0.0.1:50052"),
 		KafkaBrokers:            getEnvAsString("KAFKA_BROKERS", "127.0.0.1:9092"),
 		DataDir:                getEnvAsString("DATA_DIR", "./.data"),
+		RaftNodeGRPCAddr:       getEnvAsString("RAFT_NODE_GRPC_ADDR", "127.0.0.1:50070"),
 	}
 
 	return cfg

@@ -2,22 +2,28 @@ package raftnode
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/raft"
+	hashicorpraft "github.com/hashicorp/raft"
 	"go.uber.org/zap"
 )
 
 // Server implements RaftNodeService
 type Server struct {
 	tradingv1.UnimplementedRaftNodeServiceServer
-	logger *zap.Logger
+	raftNode *raft.Node
+	logger   *zap.Logger
 }
 
 // NewServer creates a new RaftNodeService server
-func NewServer(logger *zap.Logger) tradingv1.RaftNodeServiceServer {
+func NewServer(raftNode *raft.Node, logger *zap.Logger) tradingv1.RaftNodeServiceServer {
 	return &Server{
-		logger: logger,
+		raftNode: raftNode,
+		logger:   logger,
 	}
 }
 
@@ -31,19 +37,52 @@ func (s *Server) Apply(ctx context.Context, cmd *tradingv1.Command) (*tradingv1.
 		return nil, fmt.Errorf("kind cannot be empty")
 	}
 
-	// Log command
-	s.logger.Info("applying command",
+	// Check if this node is the leader
+	if !s.raftNode.IsLeader() {
+		leader := s.raftNode.Leader()
+		return &tradingv1.ApplyAck{
+			CommandId:   cmd.CommandId,
+			Applied:     false,
+			LeaderHint:  leader,
+			Message:     fmt.Sprintf("not leader, leader is %s", leader),
+		}, nil
+	}
+
+	// Apply command to Raft
+	result, err := s.raftNode.Apply(ctx, cmd.Payload, 2*time.Second)
+	if err != nil {
+		s.logger.Error("failed to apply command",
+			zap.String("command_id", cmd.CommandId),
+			zap.String("kind", cmd.Kind),
+			zap.Error(err),
+		)
+		return &tradingv1.ApplyAck{
+			CommandId:   cmd.CommandId,
+			Applied:     false,
+			LeaderHint:  "",
+			Message:     fmt.Sprintf("apply failed: %v", err),
+		}, nil
+	}
+
+	// Check result for duplicate
+	message := "applied"
+	if upsertResult, ok := result.(raft.UpsertResult); ok {
+		if upsertResult.Duplicate {
+			message = "duplicate"
+		}
+	}
+
+	s.logger.Info("command applied",
 		zap.String("command_id", cmd.CommandId),
 		zap.String("kind", cmd.Kind),
-		zap.Int64("ts_unix_millis", cmd.TsUnixMillis),
+		zap.String("message", message),
 	)
 
-	// Return stub response
 	return &tradingv1.ApplyAck{
-		CommandId:   cmd.CommandId,
-		Applied:     true,
-		LeaderHint:  "",
-		Message:     "applied (stub)",
+		CommandId:  cmd.CommandId,
+		Applied:    true,
+		LeaderHint: "",
+		Message:    message,
 	}, nil
 }
 
@@ -54,17 +93,102 @@ func (s *Server) Read(ctx context.Context, query *tradingv1.Query) (*tradingv1.R
 		return nil, fmt.Errorf("query_id cannot be empty")
 	}
 
-	// Log query
-	s.logger.Info("reading query",
-		zap.String("query_id", query.QueryId),
-		zap.String("kind", query.Kind),
-	)
+	// Handle GET_PROCESSED_ORDER query
+	if query.Kind == "GET_PROCESSED_ORDER" {
+		var payload struct {
+			OrderID string `json:"order_id"`
+		}
+		if err := json.Unmarshal(query.Payload, &payload); err != nil {
+			return &tradingv1.ReadResp{
+				QueryId: query.QueryId,
+				Found:   false,
+				Message: fmt.Sprintf("failed to unmarshal payload: %v", err),
+			}, nil
+		}
 
-	// Return stub response
+		// Read from FSM
+		fsm := s.raftNode.GetFSM()
+		order, found := fsm.GetProcessedOrder(payload.OrderID)
+
+		if !found {
+			return &tradingv1.ReadResp{
+				QueryId: query.QueryId,
+				Found:   false,
+				Message: "order not found",
+			}, nil
+		}
+
+		orderJSON, err := json.Marshal(order)
+		if err != nil {
+			return &tradingv1.ReadResp{
+				QueryId: query.QueryId,
+				Found:   false,
+				Message: fmt.Sprintf("failed to marshal order: %v", err),
+			}, nil
+		}
+
+		return &tradingv1.ReadResp{
+			QueryId: query.QueryId,
+			Found:   true,
+			Payload: orderJSON,
+			Message: "found",
+		}, nil
+	}
+
 	return &tradingv1.ReadResp{
 		QueryId: query.QueryId,
 		Found:   false,
-		Message: "not implemented",
+		Message: fmt.Sprintf("unknown query kind: %s", query.Kind),
 	}, nil
 }
 
+// Join handles a join request
+func (s *Server) Join(ctx context.Context, req *tradingv1.JoinRequest) (*tradingv1.JoinResponse, error) {
+	if !s.raftNode.IsLeader() {
+		leader := s.raftNode.Leader()
+		return &tradingv1.JoinResponse{
+			Ok:          false,
+			LeaderHint:  leader,
+			Message:     fmt.Sprintf("not leader, leader is %s", leader),
+		}, nil
+	}
+
+	// Add voter to cluster
+	if err := s.raftNode.AddVoter(
+		hashicorpraft.ServerID(req.NodeId),
+		hashicorpraft.ServerAddress(req.RaftAddress),
+	); err != nil {
+		s.logger.Error("failed to add voter",
+			zap.String("node_id", req.NodeId),
+			zap.String("raft_address", req.RaftAddress),
+			zap.Error(err),
+		)
+		return &tradingv1.JoinResponse{
+			Ok:         false,
+			LeaderHint: "",
+			Message:    fmt.Sprintf("failed to add voter: %v", err),
+		}, nil
+	}
+
+	s.logger.Info("node joined cluster",
+		zap.String("node_id", req.NodeId),
+		zap.String("raft_address", req.RaftAddress),
+	)
+
+	return &tradingv1.JoinResponse{
+		Ok:         true,
+		LeaderHint: "",
+		Message:    "joined successfully",
+	}, nil
+}
+
+// Leader returns leader information
+func (s *Server) Leader(ctx context.Context, req *tradingv1.LeaderRequest) (*tradingv1.LeaderResponse, error) {
+	leader := s.raftNode.Leader()
+	isLeader := s.raftNode.IsLeader()
+
+	return &tradingv1.LeaderResponse{
+		LeaderRaftAddress: leader,
+		IsLeader:          isLeader,
+	}, nil
+}
