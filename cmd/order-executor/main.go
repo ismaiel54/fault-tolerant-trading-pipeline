@@ -7,13 +7,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"os/signal"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/config"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/idempotency"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/logging"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/msg"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/observability"
@@ -39,12 +40,28 @@ func main() {
 		zap.Int("grpc_port", cfg.GRPCPort),
 		zap.Int("http_port", cfg.HTTPPort),
 		zap.String("kafka_brokers", cfg.KafkaBrokers),
+		zap.String("data_dir", cfg.DataDir),
 	)
+
+	// Create data directory
+	if err := os.MkdirAll(cfg.DataDir, 0755); err != nil {
+		logger.Fatal("failed to create data directory", zap.Error(err))
+	}
+
+	// Open idempotency store
+	dbPath := filepath.Join(cfg.DataDir, "orders.db")
+	store, err := idempotency.Open(dbPath)
+	if err != nil {
+		logger.Fatal("failed to open idempotency store", zap.Error(err))
+	}
+	defer store.Close()
+
+	logger.Info("idempotency store opened", zap.String("path", dbPath))
 
 	// Create health checker
 	healthChecker := observability.NewHealthChecker(logger)
 
-	// Create Kafka producer for events
+	// Create Kafka producer for outbox publisher
 	brokers := strings.Split(cfg.KafkaBrokers, ",")
 	for i := range brokers {
 		brokers[i] = strings.TrimSpace(brokers[i])
@@ -54,6 +71,9 @@ func main() {
 		logger.Fatal("failed to create kafka producer", zap.Error(err))
 	}
 	defer producer.Close()
+
+	// Create outbox publisher
+	publisher := idempotency.NewPublisher(store, producer, logger)
 
 	// Create Kafka consumer for order commands
 	consumer, err := msg.NewConsumer(brokers, "order-executor-v1", []string{msg.TopicOrdersCommands}, logger)
@@ -119,38 +139,47 @@ func main() {
 				return fmt.Errorf("symbol cannot be empty")
 			}
 
-			logger.Info("processing order command",
+			// Process order command atomically (idempotent)
+			result, err := store.ProcessOrderCommand(ctx, orderCmd)
+			if err != nil {
+				return fmt.Errorf("failed to process order command: %w", err)
+			}
+
+			if result.Duplicate {
+				logger.Info("duplicate order command detected, skipping",
+					zap.String("order_id", orderCmd.OrderID),
+					zap.String("status", result.Status),
+					zap.String("reason", result.Reason),
+				)
+				// Return nil to commit offset - order already processed
+				return nil
+			}
+
+			logger.Info("order command processed",
 				zap.String("order_id", orderCmd.OrderID),
+				zap.String("event_id", orderCmd.EventID),
 				zap.String("symbol", orderCmd.Symbol),
 				zap.String("side", orderCmd.Side),
 				zap.Int64("qty", orderCmd.Qty),
 				zap.Float64("price", orderCmd.Price),
+				zap.String("status", result.Status),
 			)
 
-			// For now, always accept
-			orderEvent := msg.OrderEventMsg{
-				EventID:      uuid.New().String(),
-				OrderID:      orderCmd.OrderID,
-				Status:       "ACCEPTED",
-				Reason:       "accepted",
-				TsUnixMillis: time.Now().UnixMilli(),
-			}
-
-			// Produce order event
-			if err := producer.ProduceJSON(ctx, msg.TopicOrdersEvents, orderEvent.OrderID, orderEvent); err != nil {
-				return fmt.Errorf("failed to produce order event: %w", err)
-			}
-
-			logger.Info("order event produced",
-				zap.String("order_id", orderEvent.OrderID),
-				zap.String("status", orderEvent.Status),
-				zap.String("reason", orderEvent.Reason),
-			)
-
+			// Outbox event was created in the transaction
+			// Publisher loop will handle publishing asynchronously
+			// Return nil to commit offset after DB transaction succeeded
 			return nil
 		})
 		if err != nil {
 			consumerErrCh <- err
+		}
+	}()
+
+	// Start outbox publisher loop
+	publisherErrCh := make(chan error, 1)
+	go func() {
+		if err := publisher.Run(ctx); err != nil {
+			publisherErrCh <- err
 		}
 	}()
 
@@ -175,15 +204,18 @@ func main() {
 		logger.Error("HTTP server error", zap.Error(err))
 	case err := <-consumerErrCh:
 		logger.Error("consumer error", zap.Error(err))
+	case err := <-publisherErrCh:
+		logger.Error("publisher error", zap.Error(err))
 	}
 
 	// Graceful shutdown
 	logger.Info("shutting down gracefully...")
 
-	// Stop consumer
+	// Stop consumer and publisher
 	cancel()
 	producer.Close()
 	consumer.Close()
+	store.Close()
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

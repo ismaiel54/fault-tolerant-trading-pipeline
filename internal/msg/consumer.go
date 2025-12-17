@@ -3,6 +3,8 @@ package msg
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -12,17 +14,21 @@ import (
 
 // Consumer wraps a Kafka consumer
 type Consumer struct {
-	client  *kgo.Client
-	logger  *zap.Logger
-	topics  []string
-	group   string
-	running int32
-	pollCount int64
+	client     *kgo.Client
+	logger     *zap.Logger
+	topics     []string
+	group      string
+	running    int32
+	pollCount  int64
 	errorCount int64
+	maxInflight int
+	semaphore  chan struct{} // Semaphore for bounded concurrency
 }
 
 // NewConsumer creates a new Kafka consumer
 func NewConsumer(brokers []string, group string, topics []string, logger *zap.Logger) (*Consumer, error) {
+	maxInflight := getEnvAsInt("MAX_INFLIGHT", 64)
+	
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(brokers...),
 		kgo.ConsumerGroup(group),
@@ -36,10 +42,12 @@ func NewConsumer(brokers []string, group string, topics []string, logger *zap.Lo
 	}
 
 	c := &Consumer{
-		client: client,
-		logger: logger,
-		topics: topics,
-		group:  group,
+		client:      client,
+		logger:      logger,
+		topics:      topics,
+		group:       group,
+		maxInflight: maxInflight,
+		semaphore:   make(chan struct{}, maxInflight),
 	}
 
 	// Log consumer initialization
@@ -47,12 +55,22 @@ func NewConsumer(brokers []string, group string, topics []string, logger *zap.Lo
 		zap.Strings("brokers", brokers),
 		zap.String("group", group),
 		zap.Strings("topics", topics),
+		zap.Int("max_inflight", maxInflight),
 	)
 
 	// Start periodic logging
 	go c.logStats()
 
 	return c, nil
+}
+
+func getEnvAsInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if intValue, err := strconv.Atoi(value); err == nil {
+			return intValue
+		}
+	}
+	return defaultValue
 }
 
 // Run starts consuming messages and calls handler for each record
@@ -91,22 +109,39 @@ func (c *Consumer) Run(ctx context.Context, handler func(context.Context, Record
 					Timestamp: record.Timestamp.UnixMilli(),
 				}
 
-				// Call handler with retry logic
-				err := c.handleWithRetry(ctx, rec, handler)
-				if err != nil {
-					c.logger.Error("handler failed after retries",
+				// Acquire semaphore (backpressure: wait if at capacity)
+				select {
+				case c.semaphore <- struct{}{}:
+					// Got slot - process in goroutine
+					go func(rec Record, kafkaRecord *kgo.Record) {
+						defer func() { <-c.semaphore }() // Release semaphore
+
+						// Call handler with retry logic
+						err := c.handleWithRetry(ctx, rec, handler)
+						if err != nil {
+							c.logger.Error("handler failed after retries",
+								zap.String("topic", rec.Topic),
+								zap.String("key", rec.Key),
+								zap.Error(err),
+							)
+							atomic.AddInt64(&c.errorCount, 1)
+							return
+						}
+
+						// Commit offset after successful handling
+						c.client.CommitRecords(ctx, kafkaRecord)
+						atomic.AddInt64(&c.pollCount, 1)
+					}(rec, record)
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+					// Semaphore full - backpressure: skip this record for now
+					// Will be retried on next poll
+					c.logger.Debug("backpressure: skipping record, workers saturated",
 						zap.String("topic", rec.Topic),
 						zap.String("key", rec.Key),
-						zap.Error(err),
 					)
-					atomic.AddInt64(&c.errorCount, 1)
-					// Continue processing other records
-					continue
 				}
-
-				// Commit offset after successful handling
-				c.client.CommitRecords(ctx, record)
-				atomic.AddInt64(&c.pollCount, 1)
 			}
 		}
 	}

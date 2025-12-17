@@ -25,6 +25,9 @@ type Config struct {
 
 	// Kafka brokers (comma-separated)
 	KafkaBrokers string
+
+	// Data directory for SQLite databases
+	DataDir string
 }
 
 // LoadConfig loads configuration from environment variables with defaults
@@ -41,6 +44,7 @@ func LoadConfig(serviceName string) *Config {
 		LogLevel:                getEnvAsString("LOG_LEVEL", "info"),
 		StreamProcessorGRPCAddr: getEnvAsString("STREAM_PROCESSOR_GRPC_ADDR", "127.0.0.1:50052"),
 		KafkaBrokers:            getEnvAsString("KAFKA_BROKERS", "127.0.0.1:9092"),
+		DataDir:                getEnvAsString("DATA_DIR", "./.data"),
 	}
 
 	return cfg

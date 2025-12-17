@@ -12,7 +12,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/config"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/logging"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/msg"
@@ -112,15 +111,16 @@ func main() {
 			)
 
 			// Transform tick into order command (simple dummy strategy)
-			orderID := uuid.New().String()
+			// Use stable IDs: order_id derived from tick event_id, event_id = tick event_id
+			orderID := "ord-" + tickMsg.EventID
 			side := "BUY"
 			if int(tickMsg.Price*100)%2 == 0 {
 				side = "SELL"
 			}
 
 			orderCmd := msg.OrderCmdMsg{
-				EventID:      uuid.New().String(),
-				OrderID:      orderID,
+				EventID:      tickMsg.EventID, // Stable: same tick event_id produces same command event_id
+				OrderID:      orderID,         // Stable: derived from tick event_id
 				Symbol:       tickMsg.Symbol,
 				Side:         side,
 				Qty:          10,

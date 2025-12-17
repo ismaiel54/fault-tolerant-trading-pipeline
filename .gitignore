@@ -44,3 +44,9 @@ build/
 *.pb.go
 *.pb.gw.go
 
+# Data directory
+.data/
+*.db
+*.db-shm
+*.db-wal
+
