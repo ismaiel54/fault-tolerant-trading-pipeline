@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+package trading.v1;
+
+option go_package = "github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1;tradingv1";
+
+// StreamProcessorService handles market data tick processing
+service StreamProcessorService {
+  rpc ProcessTick(Tick) returns (Ack);
+}
+
+// Tick represents a market data tick
+message Tick {
+  string symbol = 1;
+  double price = 2;
+  int64 ts_unix_millis = 3;
+}
+
+// Ack acknowledges receipt and processing of a tick
+message Ack {
+  string request_id = 1;
+  string message = 2;
+}
+

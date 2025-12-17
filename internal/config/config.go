@@ -19,15 +19,24 @@ type Config struct {
 
 	// Log level: debug, info, warn, error
 	LogLevel string
+
+	// Stream processor gRPC address (for market-ingestor)
+	StreamProcessorGRPCAddr string
 }
 
 // LoadConfig loads configuration from environment variables with defaults
 func LoadConfig(serviceName string) *Config {
+	defaultGRPCPort := 50051
+	if serviceName == "stream-processor" {
+		defaultGRPCPort = 50052
+	}
+	
 	cfg := &Config{
-		ServiceName: serviceName,
-		GRPCPort:    getEnvAsInt("PORT_GRPC", 50051),
-		HTTPPort:    getEnvAsInt("PORT_HTTP", 8080),
-		LogLevel:    getEnvAsString("LOG_LEVEL", "info"),
+		ServiceName:             serviceName,
+		GRPCPort:                getEnvAsInt("PORT_GRPC", defaultGRPCPort),
+		HTTPPort:                getEnvAsInt("PORT_HTTP", 8080),
+		LogLevel:                getEnvAsString("LOG_LEVEL", "info"),
+		StreamProcessorGRPCAddr: getEnvAsString("STREAM_PROCESSOR_GRPC_ADDR", "127.0.0.1:50052"),
 	}
 
 	return cfg

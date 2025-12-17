@@ -1,4 +1,4 @@
-.PHONY: fmt vet test build run-market-ingestor run-stream-processor run-order-executor run-raft-node ci clean
+.PHONY: fmt vet test proto build run-market-ingestor run-stream-processor run-order-executor run-raft-node ci clean
 
 # Go parameters
 GOCMD=go
@@ -11,8 +11,13 @@ GOVET=$(GOCMD) vet
 SERVICES=market-ingestor stream-processor order-executor raft-node
 BIN_DIR=bin
 
+# Generate protobuf code
+proto:
+	@echo "Generating protobuf code..."
+	@./scripts/gen-proto.sh
+
 # Build all services
-build: $(SERVICES)
+build: proto $(SERVICES)
 
 $(SERVICES):
 	@echo "Building $@..."
@@ -51,8 +56,8 @@ run-raft-node: raft-node
 	@echo "Running raft-node..."
 	./$(BIN_DIR)/raft-node
 
-# CI pipeline: fmt + vet + test + build
-ci: fmt vet test build
+# CI pipeline: fmt + vet + test + proto + build
+ci: fmt vet test proto build
 	@echo "CI pipeline completed successfully"
 
 # Clean build artifacts
@@ -66,8 +71,9 @@ help:
 	@echo "  fmt                  - Format code"
 	@echo "  vet                  - Run go vet"
 	@echo "  test                 - Run tests"
+	@echo "  proto                - Generate protobuf code"
 	@echo "  build                - Build all services"
 	@echo "  run-<service>        - Run a specific service"
-	@echo "  ci                   - Run CI pipeline (fmt+vet+test+build)"
+	@echo "  ci                   - Run CI pipeline (fmt+vet+test+proto+build)"
 	@echo "  clean                - Clean build artifacts"
 

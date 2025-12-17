@@ -4,7 +4,7 @@
 set -e
 
 PROTO_DIR="proto"
-OUT_DIR="proto"
+OUT_DIR="gen/proto"
 
 # Ensure protoc is installed
 if ! command -v protoc &> /dev/null; then
@@ -25,18 +25,29 @@ fi
 
 echo "Generating Go code from .proto files..."
 
-# Generate code for each proto file
-for proto_file in "$PROTO_DIR"/*.proto; do
-    if [ -f "$proto_file" ]; then
-        echo "Processing $proto_file..."
-        protoc \
-            --go_out="$OUT_DIR" \
-            --go_opt=paths=source_relative \
-            --go-grpc_out="$OUT_DIR" \
-            --go-grpc_opt=paths=source_relative \
-            "$proto_file"
+# Create output directory if it doesn't exist
+mkdir -p "$OUT_DIR"
+
+# Find all .proto files recursively and generate code
+find "$PROTO_DIR" -name "*.proto" -type f | while read -r proto_file; do
+    echo "Processing $proto_file..."
+    
+    # Get relative path from proto_dir to preserve directory structure
+    rel_path="${proto_file#$PROTO_DIR/}"
+    proto_dir=$(dirname "$rel_path")
+    
+    # Create corresponding directory in output
+    if [ "$proto_dir" != "." ]; then
+        mkdir -p "$OUT_DIR/$proto_dir"
     fi
+    
+    protoc \
+        --go_out="$OUT_DIR" \
+        --go_opt=paths=source_relative \
+        --go-grpc_out="$OUT_DIR" \
+        --go-grpc_opt=paths=source_relative \
+        --proto_path="$PROTO_DIR" \
+        "$proto_file"
 done
 
 echo "Proto code generation complete!"
-

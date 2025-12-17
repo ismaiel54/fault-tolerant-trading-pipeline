@@ -13,6 +13,8 @@ import (
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/config"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/logging"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/observability"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/rpc/streamprocessor"
+	tradingv1 "github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
@@ -40,6 +42,10 @@ func main() {
 	// Create gRPC server
 	grpcServer := grpc.NewServer()
 	healthChecker.RegisterGRPC(grpcServer)
+	
+	// Register StreamProcessorService
+	streamProcessorServer := streamprocessor.NewServer(logger)
+	tradingv1.RegisterStreamProcessorServiceServer(grpcServer, streamProcessorServer)
 
 	// Start gRPC server
 	grpcListener, err := net.Listen("tcp", cfg.GRPCAddr())

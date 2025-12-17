@@ -13,6 +13,8 @@ import (
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/config"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/logging"
 	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/observability"
+	"github.com/ismaiel54/fault-tolerant-trading-pipeline/internal/rpc/streamprocessor"
+	tradingv1 "github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1"
 	"go.uber.org/zap"
 	"google.golang.org/grpc"
 )
@@ -32,7 +34,16 @@ func main() {
 	logger.Info("starting market-ingestor service",
 		zap.Int("grpc_port", cfg.GRPCPort),
 		zap.Int("http_port", cfg.HTTPPort),
+		zap.String("stream_processor_addr", cfg.StreamProcessorGRPCAddr),
 	)
+
+	// Dial stream-processor client
+	ctx := context.Background()
+	streamProcessorClient, err := streamprocessor.Dial(ctx, cfg.StreamProcessorGRPCAddr, logger)
+	if err != nil {
+		logger.Fatal("failed to dial stream-processor", zap.Error(err))
+	}
+	defer streamProcessorClient.Close()
 
 	// Create health checker
 	healthChecker := observability.NewHealthChecker(logger)
@@ -63,6 +74,39 @@ func main() {
 		}
 	}()
 
+	// Start tick sender
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	
+	tickCounter := 0.0
+	tickCh := make(chan struct{})
+	go func() {
+		for range ticker.C {
+			tickCounter += 0.01
+			tick := &tradingv1.Tick{
+				Symbol:       "AAPL",
+				Price:        150.0 + tickCounter,
+				TsUnixMillis: time.Now().UnixMilli(),
+			}
+			
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ack, err := streamProcessorClient.ProcessTick(ctx, tick)
+			cancel()
+			
+			if err != nil {
+				logger.Error("failed to process tick", zap.Error(err))
+			} else {
+				logger.Info("tick processed",
+					zap.String("request_id", ack.RequestId),
+					zap.String("message", ack.Message),
+					zap.String("symbol", tick.Symbol),
+					zap.Float64("price", tick.Price),
+				)
+			}
+		}
+		close(tickCh)
+	}()
+
 	// Wait for interrupt signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
@@ -79,11 +123,20 @@ func main() {
 	// Graceful shutdown
 	logger.Info("shutting down gracefully...")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Stop ticker
+	ticker.Stop()
+	<-tickCh
+
+	// Close stream-processor client
+	if err := streamProcessorClient.Close(); err != nil {
+		logger.Error("error closing stream-processor client", zap.Error(err))
+	}
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	// Shutdown health checker
-	if err := healthChecker.Shutdown(ctx); err != nil {
+	if err := healthChecker.Shutdown(shutdownCtx); err != nil {
 		logger.Error("error shutting down health checker", zap.Error(err))
 	}
 

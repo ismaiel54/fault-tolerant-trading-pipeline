@@ -1,0 +1,81 @@
+syntax = "proto3";
+
+package trading.v1;
+
+option go_package = "github.com/ismaiel54/fault-tolerant-trading-pipeline/gen/proto/trading/v1;tradingv1";
+
+// OrderExecutorService handles order submission and execution
+service OrderExecutorService {
+  rpc SubmitOrder(Order) returns (OrderAck);
+}
+
+// RaftNodeService handles consensus and replication
+service RaftNodeService {
+  rpc Apply(Command) returns (ApplyAck);
+  rpc Read(Query) returns (ReadResp);
+}
+
+// Side represents order side
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+// OrderStatus represents order status
+enum OrderStatus {
+  ORDER_STATUS_UNSPECIFIED = 0;
+  ORDER_STATUS_ACCEPTED = 1;
+  ORDER_STATUS_REJECTED = 2;
+  ORDER_STATUS_EXECUTED = 3;
+}
+
+// Order represents a trading order
+message Order {
+  string order_id = 1;
+  string symbol = 2;
+  Side side = 3;
+  int64 qty = 4;
+  double price = 5;
+  int64 ts_unix_millis = 6;
+}
+
+// OrderAck acknowledges order submission
+message OrderAck {
+  string order_id = 1;
+  OrderStatus status = 2;
+  string reason = 3;
+  int64 ts_unix_millis = 4;
+}
+
+// Command represents a Raft command to be applied
+message Command {
+  string command_id = 1;
+  string kind = 2; // e.g. "ORDER_UPSERT"
+  bytes payload = 3; // opaque for now
+  int64 ts_unix_millis = 4;
+}
+
+// ApplyAck acknowledges command application
+message ApplyAck {
+  string command_id = 1;
+  bool applied = 2;
+  string leader_hint = 3; // if not leader, hint who is
+  string message = 4;
+}
+
+// Query represents a read query
+message Query {
+  string query_id = 1;
+  string kind = 2; // e.g. "GET_ORDER"
+  bytes payload = 3;
+}
+
+// ReadResp represents a read query response
+message ReadResp {
+  string query_id = 1;
+  bool found = 2;
+  bytes payload = 3;
+  string message = 4;
+}
+
