@@ -2,7 +2,7 @@
 
 ## System Architecture
 
-This is a fault-tolerant distributed trading pipeline built with Go, consisting of 4 microservices:
+Fault-tolerant distributed trading pipeline built with Go. Four microservices:
 
 ### Services
 
@@ -25,14 +25,14 @@ This is a fault-tolerant distributed trading pipeline built with Go, consisting 
 
 ### Configuration
 
-- Environment-based configuration with sensible defaults
+- Environment-based configuration with defaults
 - Configurable ports (PORT_GRPC, PORT_HTTP)
 - Configurable log levels (LOG_LEVEL)
 
 ### Deployment
 
 - Docker Compose for local development
-- Multi-stage Docker builds for optimized images
+- Multi-stage Docker builds
 - Health checks configured for all services
 
 ## Development

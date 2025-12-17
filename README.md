@@ -1,6 +1,6 @@
 # Fault-Tolerant Trading Pipeline
 
-A production-quality distributed trading pipeline built with Go, featuring 4 microservices with gRPC communication, health checks, and graceful shutdown.
+Distributed trading pipeline built with Go. Four microservices using gRPC for communication, with health checks and graceful shutdown.
 
 ## Architecture
 
