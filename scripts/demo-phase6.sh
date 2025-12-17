@@ -30,12 +30,12 @@ echo "Step 1: Starting Redpanda..."
 make dev-up > /dev/null 2>&1
 sleep 3
 make topics > /dev/null 2>&1
-echo "✓ Redpanda started"
+echo "PASS: Redpanda started"
 
 # Step 2: Build services
 echo "Step 2: Building services..."
 make build > /dev/null 2>&1
-echo "✓ Services built"
+echo "PASS: Services built"
 
 # Step 3: Start Raft nodes
 echo "Step 3: Starting Raft cluster..."
@@ -53,7 +53,7 @@ sleep 2
 RAFT3_PID=$!
 sleep 5
 
-echo "✓ Raft cluster started (PIDs: $RAFT1_PID, $RAFT2_PID, $RAFT3_PID)"
+echo "PASS: Raft cluster started (PIDs: $RAFT1_PID, $RAFT2_PID, $RAFT3_PID)"
 
 # Step 4: Start services
 echo "Step 4: Starting trading pipeline..."
@@ -72,7 +72,7 @@ sleep 2
 MARKET_INGESTOR_PID=$!
 sleep 3
 
-echo "✓ Trading pipeline started"
+echo "PASS: Trading pipeline started"
 
 # Scenario 1: Partition leader during Apply
 echo ""
@@ -135,7 +135,7 @@ export RAFT_BOOTSTRAP=true
 RAFT1_PID=$!
 sleep 5
 
-echo "✓ Node1 restarted with exit-on-leader"
+echo "PASS: Node1 restarted with exit-on-leader"
 sleep 5
 
 # Scenario 3: Flapping network
@@ -179,7 +179,7 @@ export RAFT_DATA_DIR=./.data/raft/node3
 RAFT3_PID=$!
 sleep 5
 
-echo "✓ Chaos enabled on node2 and node3"
+echo "PASS: Chaos enabled on node2 and node3"
 
 # Let system run for a bit
 echo ""
@@ -195,11 +195,11 @@ timeout 10s ./bin/verifier 10 127.0.0.1:9092 || VERIFIER_EXIT=$?
 
 if [ "${VERIFIER_EXIT:-0}" = "0" ]; then
 	echo ""
-	echo "✅ VERIFICATION PASSED: No duplicates detected!"
+	echo "PASS: VERIFICATION PASSED: No duplicates detected!"
 	exit 0
 else
 	echo ""
-	echo "❌ VERIFICATION FAILED: Duplicates detected!"
+	echo "FAIL: VERIFICATION FAILED: Duplicates detected!"
 	exit 1
 fi
 

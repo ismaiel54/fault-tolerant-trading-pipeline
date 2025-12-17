@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"os"
 	"strings"
@@ -14,21 +15,20 @@ import (
 )
 
 func main() {
-	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: %s <duration_seconds> [brokers]\n", os.Args[0])
-		fmt.Fprintf(os.Stderr, "Example: %s 30 127.0.0.1:9092\n", os.Args[0])
-		os.Exit(1)
-	}
+	var (
+		windowSeconds = flag.Int("window", 10, "Time window in seconds to consume events")
+		expectedUnique = flag.Int("expected", 50, "Expected number of unique order IDs")
+		brokers = flag.String("brokers", "127.0.0.1:9092", "Kafka broker addresses")
+	)
+	flag.Parse()
 
-	var durationSeconds int
-	if _, err := fmt.Sscanf(os.Args[1], "%d", &durationSeconds); err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid duration: %v\n", err)
-		os.Exit(1)
-	}
-
-	brokers := "127.0.0.1:9092"
-	if len(os.Args) >= 3 {
-		brokers = os.Args[2]
+	// Support legacy positional args
+	if len(os.Args) >= 2 && os.Args[1][0] != '-' {
+		if _, err := fmt.Sscanf(os.Args[1], "%d", windowSeconds); err == nil {
+			if len(os.Args) >= 3 {
+				*brokers = os.Args[2]
+			}
+		}
 	}
 
 	logger, err := logging.NewLogger("verifier", "info")
@@ -38,13 +38,14 @@ func main() {
 	}
 	defer logger.Sync()
 
-	brokerList := strings.Split(brokers, ",")
+	brokerList := strings.Split(*brokers, ",")
 	for i := range brokerList {
 		brokerList[i] = strings.TrimSpace(brokerList[i])
 	}
 
 	logger.Info("starting verifier",
-		zap.Int("duration_seconds", durationSeconds),
+		zap.Int("window_seconds", *windowSeconds),
+		zap.Int("expected_unique", *expectedUnique),
 		zap.Strings("brokers", brokerList),
 	)
 
@@ -59,7 +60,7 @@ func main() {
 	orderCounts := make(map[string]int)
 	eventIDs := make(map[string]string) // order_id -> first event_id
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(durationSeconds)*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(*windowSeconds)*time.Second)
 	defer cancel()
 
 	// Consume events
@@ -107,6 +108,7 @@ func main() {
 	fmt.Println("\n=== Verification Results ===")
 	fmt.Printf("Total events consumed: %d\n", totalEvents)
 	fmt.Printf("Unique order IDs: %d\n", uniqueOrders)
+	fmt.Printf("Expected unique order IDs: %d\n", *expectedUnique)
 	fmt.Printf("Duplicate order IDs: %d\n", len(duplicates))
 
 	if len(duplicates) > 0 {
@@ -115,11 +117,16 @@ func main() {
 			fmt.Printf("  Order ID: %s, Count: %d, First Event ID: %s\n",
 				orderID, count, eventIDs[orderID])
 		}
-		fmt.Println("\n❌ VERIFICATION FAILED: Duplicates detected!")
+		fmt.Println("\nFAIL: VERIFICATION FAILED: Duplicates detected!")
 		os.Exit(1)
 	}
 
-	fmt.Println("\n✅ VERIFICATION PASSED: No duplicates detected!")
+	if uniqueOrders < *expectedUnique {
+		fmt.Printf("\nWARNING: Expected at least %d unique orders, got %d\n", *expectedUnique, uniqueOrders)
+		// Don't fail on this, just warn
+	}
+
+	fmt.Println("\nPASS: VERIFICATION PASSED: No duplicates detected!")
 	os.Exit(0)
 }
 

@@ -1,4 +1,4 @@
-.PHONY: fmt vet test test-integration proto build run-market-ingestor run-stream-processor run-order-executor run-raft-node run-raft-1 run-raft-2 run-raft-3 ci clean dev-up dev-down topics topics-list
+.PHONY: fmt vet test test-integration proto build run-market-ingestor run-stream-processor run-order-executor run-raft-node run-raft-1 run-raft-2 run-raft-3 ci clean dev-up dev-down topics topics-list doctor smoke stack-up stack-down
 
 # Go parameters
 GOCMD=go
@@ -8,7 +8,7 @@ GOFMT=$(GOCMD) fmt
 GOVET=$(GOCMD) vet
 
 # Service binaries
-SERVICES=market-ingestor stream-processor order-executor raft-node verifier
+SERVICES=market-ingestor stream-processor order-executor raft-node verifier producer
 BIN_DIR=bin
 
 # Generate protobuf code
@@ -97,6 +97,25 @@ topics:
 topics-list:
 	@echo "Listing Kafka topics..."
 	@./scripts/topics-list.sh
+
+# Doctor: Check prerequisites
+doctor:
+	@echo "Running doctor checks..."
+	@./scripts/doctor.sh
+
+# Stack management
+stack-up:
+	@echo "Starting full stack..."
+	@./scripts/stack-up.sh
+
+stack-down:
+	@echo "Stopping full stack..."
+	@./scripts/stack-down.sh
+
+# Smoke test
+smoke:
+	@echo "Running smoke test..."
+	@./scripts/smoke.sh
 
 # Help
 help:
